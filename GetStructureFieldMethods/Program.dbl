@@ -1,0 +1,298 @@
+
+import System
+import System.Collections.Generic
+import System.Linq
+import System.Text
+
+namespace GetStructureFieldMethods
+
+    main
+    proc
+        data x = new Repository.RpsTools()
+        
+        data methods = x.GetStructureFieldMethods("EMPLOYEE")
+        data methodName, string
+
+        if (methods.Count) then
+        begin
+            foreach methodName in methods
+            begin
+                Console.WriteLine(methodName)
+            end
+        end
+        else
+        begin
+            Console.Write("No field methods found!")
+        end
+
+        Console.Write("Press a key: ")
+        Console.ReadKey()
+    endmain
+
+endnamespace
+
+namespace Repository
+
+    .define DDINFO_STRUCTURE
+    .include "RPSLIB:ddinfo.def"
+
+    public class RpsTools
+
+        public method GetStructureFieldMethods, @List<string>
+            required in StructureName, string
+        proc
+            data RpsControl, dcs
+
+            OpenRepository(RpsControl)
+
+            data MethodNames = new List<string>()
+
+            ProcessStructureFields(RpsControl,StructureName,MethodNames)
+
+            CloseRepository(RpsControl)
+
+            mreturn MethodNames
+
+        endmethod
+
+        private method ProcessStructureFields, void
+            required inout RpsControl, dcs
+            required in StructureName, string
+            required inout MethodNames, @List<string>
+        proc
+            ;Get the structure information record
+            data StructureInfo, s_info
+            xcall DD_STRUCT(RpsControl, DDS_INFO, StructureName, StructureInfo)
+            if (RpsControl.error)
+            begin
+                ;No structure!
+                CloseRepository(RpsControl)
+                throw new ApplicationException("Structure not found!")
+            end
+
+            ;Get the list of fields
+            data FieldNames, [999]a30
+            xcall dd_field(RpsControl,DDF_SLIST,StructureInfo.si_childct,FieldNames)
+
+            ;Process each field in the structure
+            data FieldInfo, f_info
+            data FieldNumber = 0
+            for FieldNumber from 1 thru StructureInfo.si_childct
+            begin
+                ;Get the field information record
+                xcall dd_field(RpsControl,DDF_INFO,FieldNames[FieldNumber],FieldInfo)
+                ;Process the field
+                FieldTypeDispatcher(RpsControl,FieldNames[FieldNumber],FieldInfo,MethodNames)
+            end
+        endmethod
+
+        private method FieldTypeDispatcher, void
+            required inout RpsControl, dcs
+            required in FieldName, string
+            required in FieldInfo, f_info
+            required inout MethodNames, @List<string>
+        proc
+            using FieldInfo.fi_group select
+            (F_NOGROUP),
+            begin
+                ;Just a regular field
+                ProcessField(RpsControl,FieldName,FieldInfo,MethodNames)
+            end
+            (),
+            begin
+                ;We have a group. Is it an EXPLICIT group (locally defined fields) or an IMPLICIT group (fields defined by a different structure)?
+                if (FieldInfo.fi_struct) then
+                begin
+                    ;It's an IMPLICIT group
+                    ProcessImplicitGroup(RpsControl,FieldName,FieldInfo,MethodNames)
+                end
+                else
+                begin
+                    ;It's an EXPLICIT group
+                    ProcessExplicitGroup(RpsControl,FieldName,FieldInfo,MethodNames)
+                end
+            end
+            endusing
+
+        endmethod
+
+        ;;; <summary>
+        ;;; Process a regular (non-group) field
+        ;;; </summary>
+        ;;; <param name="RpsControl"></param>
+        ;;; <param name="fieldName"></param>
+        ;;; <param name="methodNames"></param>
+        private method ProcessField, void
+            required inout RpsControl, dcs
+            required in FieldName, string
+            required in FieldInfo, f_info
+            required inout MethodNames, @List<string>
+        proc
+
+            data MethodName, a30
+
+            ;Arrive method?
+            if (FieldInfo.fi_arrivemeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_arrivemeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+            ;Leave method?
+            if (FieldInfo.fi_leavemeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_leavemeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+            ;Drill method?
+            if (FieldInfo.fi_drillmeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_drillmeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+            ;Hyperlink method?
+            if (FieldInfo.fi_hypermeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_hypermeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+            ;Change method?
+            if (FieldInfo.fi_changemeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_changemeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+            ;Display method?
+            if (FieldInfo.fi_dispmeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_dispmeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+            ;Edit format method?
+            if (FieldInfo.fi_editfmtmeth)
+            begin
+                xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_editfmtmeth,MethodName)
+                MaybeAdd(MethodName,MethodNames)
+            end
+
+        endmethod
+
+        ;;; <summary>
+        ;;; Process an EXPLICIT group
+        ;;; </summary>
+        ;;; <param name="methodNames"></param>
+        private method processExplicitGroup, void
+            required inout RpsControl, dcs
+            required in FieldName, string
+            required in FieldInfo, f_info
+            required inout MethodNames, @List<string>
+        proc
+            ;Set context to the first field in the group
+            xcall dd_field(RpsControl,DDF_GROUP,FieldName)
+
+            ;Get the list of fields in the group
+            data GroupFieldNames, [999]a30
+            xcall dd_field(RpsControl,DDF_SLIST,FieldInfo.fi_mbrct,GroupFieldNames)
+
+            ;Iterate through the fields looking for fields with methods, and also looking for groups
+            data GroupFieldInfo, f_info
+            data GroupFieldNumber = 0
+            for GroupFieldNumber from 1 thru FieldInfo.fi_mbrct
+            begin
+                ;Get the field information record
+                xcall dd_field(RpsControl,DDF_INFO,GroupFieldNames[GroupFieldNumber],GroupFieldInfo)
+                FieldTypeDispatcher(RpsControl,GroupFieldNames[GroupFieldNumber],GroupFieldInfo,MethodNames)
+            end
+
+            ;Reset context out of the group
+            xcall DD_FIELD(RpsControl,DDF_ENDGROUP)
+        endmethod
+
+        ;;; <summary>
+        ;;; Process an IMPLICIT group
+        ;;; </summary>
+        ;;; <param name="methodNames"></param>
+        private method ProcessImplicitGroup, void
+            required inout RpsControl, dcs
+            required in FieldName, string
+            required in FieldInfo, f_info
+            required inout MethodNames, @List<string>
+        proc
+            ;Get the name of the structure associated with the implicit group
+            data GroupStructureName, a30
+            xcall dd_field(RpsControl,DDF_TEXT,FieldInfo.fi_struct,GroupStructureName)
+
+            ;Save the current structure name and select the structure for the implicit group
+            data PreviousStructure = RpsControl.sname
+            data GroupStructureInfo, s_info
+            xcall dd_struct(RpsControl,DDS_INFO,GroupStructureName,GroupStructureInfo)
+
+            ;Get the list of fields in the group
+            data GroupFieldNames, [999]a30
+            xcall dd_field(RpsControl,DDF_SLIST,GroupStructureInfo.si_nmflds,GroupFieldNames)
+
+            ;Iterate through the fields looking for fields with methods, and also looking for groups
+            data GroupFieldInfo, f_info
+            data GroupFieldNumber = 0
+            for GroupFieldNumber from 1 thru FieldInfo.fi_mbrct
+            begin
+                ;Get the field information record
+                xcall dd_field(RpsControl,DDF_INFO,GroupFieldNames[GroupFieldNumber],GroupFieldInfo)
+                FieldTypeDispatcher(RpsControl,GroupFieldNames[GroupFieldNumber],GroupFieldInfo,MethodNames)
+            end
+
+            ;Restore the previous structure
+            xcall dd_struct(RpsControl,DDS_INFO,PreviousStructure,GroupStructureInfo)
+
+        endmethod
+
+        ;;; <summary>
+        ;;; Open the repository
+        ;;; </summary>
+        private method OpenRepository, void
+            required inout RpsControl, dcs
+        proc
+            xcall dd_init(RpsControl)
+            if (RpsControl.error)
+                throw new ApplicationException("Failed to open repository!")
+        endmethod
+
+        ;;; <summary>
+        ;;; Close the repository
+        ;;; </summary>
+        private method CloseRepository, void
+            required inout RpsControl, dcs
+        proc
+            try
+            begin
+                xcall dd_exit(RpsControl)
+            end
+            catch (e, @Exception)
+            begin
+                nop
+            end
+            endtry
+        endmethod
+
+        ;;; <summary>
+        ;;; Add a string to a list if not already there
+        ;;; </summary>
+        ;;; <param name="stringToAdd">String to maybe add to collection</param>
+        ;;; <param name="listOfStrings">Collection of strings</param>
+        private method MaybeAdd, void
+            required in StringToAdd, a
+            required inout ListOfStrings, @List<string>
+        proc
+            if (!ListOfStrings.Any(lambda(existingString) { existingString == StringToAdd } ))
+            begin
+                ListOfStrings.Add(stringToAdd)
+            end
+        endmethod
+
+    endclass
+
+endnamespace
